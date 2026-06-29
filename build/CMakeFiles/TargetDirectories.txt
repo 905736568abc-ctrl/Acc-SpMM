@@ -1,0 +1,4 @@
+/root/Acc-SpMM/build/CMakeFiles/acc_spmm_core.dir
+/root/Acc-SpMM/build/CMakeFiles/acc_spmm_bench.dir
+/root/Acc-SpMM/build/CMakeFiles/edit_cache.dir
+/root/Acc-SpMM/build/CMakeFiles/rebuild_cache.dir

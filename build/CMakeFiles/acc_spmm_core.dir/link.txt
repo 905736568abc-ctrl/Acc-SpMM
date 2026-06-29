@@ -1,0 +1,2 @@
+/usr/bin/ar qc libacc_spmm_core.a CMakeFiles/acc_spmm_core.dir/baseline/cusparse_spmm.cu.o CMakeFiles/acc_spmm_core.dir/dtc/dtc_spmm.cu.o CMakeFiles/acc_spmm_core.dir/acc/pipeline.cu.o CMakeFiles/acc_spmm_core.dir/acc/reorder.cpp.o CMakeFiles/acc_spmm_core.dir/benchmark/matrix_loader.cpp.o
+/usr/bin/ranlib libacc_spmm_core.a
