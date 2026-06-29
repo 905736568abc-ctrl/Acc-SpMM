@@ -1,22 +1,34 @@
-# Acc-SpMM
+# Acc-SpMM-Reproduce
 
-当前工作区的规范结构如下：
+This repository is a remote-first reproduction scaffold for the paper "Acc-SpMM: Accelerating General-purpose Sparse Matrix-Matrix Multiplication with GPU Tensor Cores".
 
-```text
-Acc-SpMM/
-├── Acc-SpMM-Reproduce/
-│   ├── acc/
-│   ├── baseline/
-│   ├── benchmark/
-│   ├── datasets/
-│   ├── dtc/
-│   ├── scripts/
-│   ├── CMakeLists.txt
-│   └── README.md
-├── Zhao 等 - 2025 - Acc-SpMM Accelerating General-purpose Sparse Matrix-Matrix Multiplication with GPU Tensor Cores.pdf
-└── README.md
+## Repository Layout
+
+- `acc/`: reordering, BitTCF, and pipeline-related interfaces
+- `baseline/`: cuSPARSE baseline implementation
+- `benchmark/`: Matrix Market loader and benchmark entry
+- `datasets/`: local dataset placement
+- `docs/papers/`: reference paper PDF
+- `dtc/`: DTC-SpMM placeholder baseline
+- `scripts/`: remote build and run helper scripts
+
+## Current Scope
+
+- Matrix Market loader for SuiteSparse-style `.mtx` files
+- cuSPARSE baseline benchmark
+- CPU reference checker for correctness
+- Placeholders for DTC, reordering, BitTCF, and pipeline modules
+
+## Quick Start On A Remote Linux Server
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+./build/acc_spmm_bench --matrix ./datasets/example.mtx --n 128 --warmup 5 --repeat 20 --check 1
 ```
 
-- 规范项目根目录：`Acc-SpMM-Reproduce/`
-- 论文 PDF 保留在工作区根目录，便于对照阅读
-- 不再保留额外的嵌套副本目录
+## Expected Inputs
+
+- Sparse matrix `A` in Matrix Market format
+- Dense matrix `B` is generated deterministically inside the benchmark
+- Output matrix `C` is validated against a CPU reference when `--check 1`
