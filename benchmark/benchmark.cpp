@@ -55,10 +55,13 @@ int main(int argc, char** argv) {
     try {
         const acc_spmm::BenchmarkConfig config = acc_spmm::parse_args(argc, argv);
         const acc_spmm::CsrMatrix matrix = acc_spmm::load_matrix_market(config.matrix_path);
-        const acc_spmm::DenseMatrix rhs = acc_spmm::make_dense_matrix(matrix.cols, config.dense_cols);
-        const acc_spmm::ReorderPlan reorder = acc_spmm::build_affinity_reorder(matrix);
         const double density = acc_spmm::matrix_density(matrix);
         const double flop_count = acc_spmm::spmm_flop_count(matrix, config.dense_cols);
+        const acc_spmm::DenseMatrix rhs = acc_spmm::make_dense_matrix(matrix.cols, config.dense_cols);
+        const acc_spmm::ReorderPlan reorder = acc_spmm::build_affinity_reorder(matrix);
+        const acc_spmm::CsrMatrix reordered_matrix = acc_spmm::apply_reorder(matrix, reorder);
+        const acc_spmm::BittcfFormat bittcf_original = acc_spmm::build_bittcf(matrix);
+        const acc_spmm::BittcfFormat bittcf_reordered = acc_spmm::build_bittcf(reordered_matrix);
 
         std::cout << "[Acc-SpMM-Reproduce]\n";
         std::cout << "matrix=" << config.matrix_path << "\n";
@@ -69,6 +72,24 @@ int main(int argc, char** argv) {
         std::cout << "density=" << density << "\n";
         std::cout << "spmm_flop_count=" << flop_count << "\n";
         std::cout << "reorder_plan_size=" << reorder.permutation.size() << "\n";
+        std::cout << "reorder_before adjacent_tile_jaccard=" << reorder.original_metrics.adjacent_tile_jaccard
+                  << " adjacent_first_tile_distance=" << reorder.original_metrics.adjacent_first_tile_distance
+                  << " avg_unique_col_tiles=" << reorder.original_metrics.avg_unique_col_tiles
+                  << " avg_tile_occupancy=" << reorder.original_metrics.avg_tile_occupancy << "\n";
+        std::cout << "reorder_after adjacent_tile_jaccard=" << reorder.reordered_metrics.adjacent_tile_jaccard
+                  << " adjacent_first_tile_distance=" << reorder.reordered_metrics.adjacent_first_tile_distance
+                  << " avg_unique_col_tiles=" << reorder.reordered_metrics.avg_unique_col_tiles
+                  << " avg_tile_occupancy=" << reorder.reordered_metrics.avg_tile_occupancy << "\n";
+        std::cout << "bittcf_original row_windows=" << bittcf_original.row_window_count
+                  << " tc_blocks=" << bittcf_original.tc_block_count
+                  << " words_per_block=" << bittcf_original.words_per_block
+                  << " avg_block_occupancy=" << bittcf_original.avg_block_occupancy
+                  << " compression_ratio_vs_csr=" << bittcf_original.compression_ratio_vs_csr << "\n";
+        std::cout << "bittcf_reordered row_windows=" << bittcf_reordered.row_window_count
+                  << " tc_blocks=" << bittcf_reordered.tc_block_count
+                  << " words_per_block=" << bittcf_reordered.words_per_block
+                  << " avg_block_occupancy=" << bittcf_reordered.avg_block_occupancy
+                  << " compression_ratio_vs_csr=" << bittcf_reordered.compression_ratio_vs_csr << "\n";
 
         acc_spmm::DenseMatrix reference;
         float diff = -1.0f;
@@ -94,6 +115,16 @@ int main(int argc, char** argv) {
         std::cout << "csv,matrix=" << config.matrix_path << ",rows=" << matrix.rows << ",cols=" << matrix.cols
                   << ",nnz=" << matrix.nnz() << ",density=" << density << ",n=" << config.dense_cols
                   << ",warmup=" << config.warmup << ",repeat=" << config.repeat << ",kernel=cusparse"
+                  << ",reorder_before_jaccard=" << reorder.original_metrics.adjacent_tile_jaccard
+                  << ",reorder_after_jaccard=" << reorder.reordered_metrics.adjacent_tile_jaccard
+                  << ",reorder_before_tile_distance=" << reorder.original_metrics.adjacent_first_tile_distance
+                  << ",reorder_after_tile_distance=" << reorder.reordered_metrics.adjacent_first_tile_distance
+                  << ",bittcf_original_blocks=" << bittcf_original.tc_block_count
+                  << ",bittcf_reordered_blocks=" << bittcf_reordered.tc_block_count
+                  << ",bittcf_original_occupancy=" << bittcf_original.avg_block_occupancy
+                  << ",bittcf_reordered_occupancy=" << bittcf_reordered.avg_block_occupancy
+                  << ",bittcf_original_compression=" << bittcf_original.compression_ratio_vs_csr
+                  << ",bittcf_reordered_compression=" << bittcf_reordered.compression_ratio_vs_csr
                   << ",average_ms=" << cusparse.average_ms << ",gflops=" << cusparse.gflops
                   << ",reference_max_abs=" << reference_max_abs << ",max_abs_diff=" << diff
                   << ",max_relative_diff=" << relative_diff << "\n";

@@ -15,6 +15,7 @@ option(ACC_SPMM_BUILD_BENCHMARK "Build benchmark executable." ON)
 option(ACC_SPMM_ENABLE_NATIVE "Enable host-native optimizations for CPU-only helpers." OFF)
 
 set(ACC_SPMM_SOURCES
+    acc/bittcf.cpp
     baseline/cusparse_spmm.cu
     dtc/dtc_spmm.cu
     acc/pipeline.cu
