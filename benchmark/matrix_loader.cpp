@@ -164,4 +164,16 @@ float max_abs_diff(const DenseMatrix& lhs, const DenseMatrix& rhs) {
     return diff;
 }
 
+double matrix_density(const CsrMatrix& matrix) {
+    if (matrix.rows <= 0 || matrix.cols <= 0) {
+        return 0.0;
+    }
+    const double total = static_cast<double>(matrix.rows) * static_cast<double>(matrix.cols);
+    return static_cast<double>(matrix.nnz()) / total;
+}
+
+double spmm_flop_count(const CsrMatrix& matrix, int dense_cols) {
+    return 2.0 * static_cast<double>(matrix.nnz()) * static_cast<double>(dense_cols);
+}
+
 }  // namespace acc_spmm

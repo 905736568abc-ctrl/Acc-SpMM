@@ -27,6 +27,30 @@ cmake --build build -j
 ./build/acc_spmm_bench --matrix ./datasets/example.mtx --n 128 --warmup 5 --repeat 20 --check 1
 ```
 
+## Phase 1 Baseline Collection
+
+Use a single matrix for a quick smoke test:
+
+```bash
+./build/acc_spmm_bench --matrix ./datasets/test.mtx --n 128 --warmup 2 --repeat 5 --check 1
+```
+
+Use the batch script to collect baseline data for all `.mtx` files in `datasets/` with `N=32,64,128,256`:
+
+```bash
+chmod +x ./scripts/run_phase1_baseline.sh
+./scripts/run_phase1_baseline.sh ./datasets 2 5
+```
+
+The script prints CSV rows containing:
+
+- matrix path
+- rows, cols, nnz, density
+- dense column count `N`
+- warmup and repeat
+- kernel time and GFLOPS
+- correctness error against CPU reference
+
 ## Expected Inputs
 
 - Sparse matrix `A` in Matrix Market format

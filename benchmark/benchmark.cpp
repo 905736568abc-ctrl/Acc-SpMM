@@ -4,6 +4,7 @@
 #include "dtc/dtc_spmm.hpp"
 
 #include <exception>
+#include <iomanip>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -56,15 +57,21 @@ int main(int argc, char** argv) {
         const acc_spmm::CsrMatrix matrix = acc_spmm::load_matrix_market(config.matrix_path);
         const acc_spmm::DenseMatrix rhs = acc_spmm::make_dense_matrix(matrix.cols, config.dense_cols);
         const acc_spmm::ReorderPlan reorder = acc_spmm::build_affinity_reorder(matrix);
+        const double density = acc_spmm::matrix_density(matrix);
+        const double flop_count = acc_spmm::spmm_flop_count(matrix, config.dense_cols);
 
         std::cout << "[Acc-SpMM-Reproduce]\n";
         std::cout << "matrix=" << config.matrix_path << "\n";
         std::cout << "rows=" << matrix.rows << ", cols=" << matrix.cols << ", nnz=" << matrix.nnz() << "\n";
         std::cout << "dense_cols=" << config.dense_cols << ", warmup=" << config.warmup << ", repeat=" << config.repeat
                   << "\n";
+        std::cout << std::fixed << std::setprecision(8);
+        std::cout << "density=" << density << "\n";
+        std::cout << "spmm_flop_count=" << flop_count << "\n";
         std::cout << "reorder_plan_size=" << reorder.permutation.size() << "\n";
 
         acc_spmm::DenseMatrix reference;
+        float diff = -1.0f;
         if (config.check) {
             std::cout << "computing_reference=1\n";
             reference = acc_spmm::compute_reference_spmm(matrix, rhs);
@@ -74,9 +81,15 @@ int main(int argc, char** argv) {
         std::cout << "kernel=cusparse average_ms=" << cusparse.average_ms << " gflops=" << cusparse.gflops << "\n";
 
         if (config.check) {
-            const float diff = acc_spmm::max_abs_diff(reference, cusparse.output);
+            diff = acc_spmm::max_abs_diff(reference, cusparse.output);
             std::cout << "kernel=cusparse max_abs_diff=" << diff << "\n";
         }
+
+        std::cout << "csv,matrix=" << config.matrix_path << ",rows=" << matrix.rows << ",cols=" << matrix.cols
+                  << ",nnz=" << matrix.nnz() << ",density=" << density << ",n=" << config.dense_cols
+                  << ",warmup=" << config.warmup << ",repeat=" << config.repeat << ",kernel=cusparse"
+                  << ",average_ms=" << cusparse.average_ms << ",gflops=" << cusparse.gflops
+                  << ",max_abs_diff=" << diff << "\n";
 
         try {
             (void)acc_spmm::run_dtc_placeholder(matrix, rhs, config.warmup, config.repeat);
