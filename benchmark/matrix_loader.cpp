@@ -152,6 +152,14 @@ DenseMatrix compute_reference_spmm(const CsrMatrix& matrix, const DenseMatrix& r
     return out;
 }
 
+float max_abs_value(const DenseMatrix& matrix) {
+    float max_value = 0.0f;
+    for (float value : matrix.values) {
+        max_value = std::max(max_value, std::fabs(value));
+    }
+    return max_value;
+}
+
 float max_abs_diff(const DenseMatrix& lhs, const DenseMatrix& rhs) {
     if (lhs.rows != rhs.rows || lhs.cols != rhs.cols || lhs.values.size() != rhs.values.size()) {
         throw std::runtime_error("Dense matrix diff dimension mismatch.");
@@ -162,6 +170,22 @@ float max_abs_diff(const DenseMatrix& lhs, const DenseMatrix& rhs) {
         diff = std::max(diff, std::fabs(lhs.values[i] - rhs.values[i]));
     }
     return diff;
+}
+
+float max_relative_diff(const DenseMatrix& reference, const DenseMatrix& candidate) {
+    if (reference.rows != candidate.rows || reference.cols != candidate.cols ||
+        reference.values.size() != candidate.values.size()) {
+        throw std::runtime_error("Dense matrix relative diff dimension mismatch.");
+    }
+
+    float max_diff = 0.0f;
+    for (size_t i = 0; i < reference.values.size(); ++i) {
+        const float ref_abs = std::fabs(reference.values[i]);
+        const float denom = std::max(ref_abs, 1.0e-12f);
+        const float rel = std::fabs(reference.values[i] - candidate.values[i]) / denom;
+        max_diff = std::max(max_diff, rel);
+    }
+    return max_diff;
 }
 
 double matrix_density(const CsrMatrix& matrix) {

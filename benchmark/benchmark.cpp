@@ -72,9 +72,12 @@ int main(int argc, char** argv) {
 
         acc_spmm::DenseMatrix reference;
         float diff = -1.0f;
+        float reference_max_abs = -1.0f;
+        float relative_diff = -1.0f;
         if (config.check) {
             std::cout << "computing_reference=1\n";
             reference = acc_spmm::compute_reference_spmm(matrix, rhs);
+            reference_max_abs = acc_spmm::max_abs_value(reference);
         }
 
         const acc_spmm::KernelResult cusparse = acc_spmm::run_cusparse_spmm(matrix, rhs, config.warmup, config.repeat);
@@ -82,14 +85,18 @@ int main(int argc, char** argv) {
 
         if (config.check) {
             diff = acc_spmm::max_abs_diff(reference, cusparse.output);
+            relative_diff = acc_spmm::max_relative_diff(reference, cusparse.output);
+            std::cout << "kernel=cusparse reference_max_abs=" << reference_max_abs << "\n";
             std::cout << "kernel=cusparse max_abs_diff=" << diff << "\n";
+            std::cout << "kernel=cusparse max_relative_diff=" << relative_diff << "\n";
         }
 
         std::cout << "csv,matrix=" << config.matrix_path << ",rows=" << matrix.rows << ",cols=" << matrix.cols
                   << ",nnz=" << matrix.nnz() << ",density=" << density << ",n=" << config.dense_cols
                   << ",warmup=" << config.warmup << ",repeat=" << config.repeat << ",kernel=cusparse"
                   << ",average_ms=" << cusparse.average_ms << ",gflops=" << cusparse.gflops
-                  << ",max_abs_diff=" << diff << "\n";
+                  << ",reference_max_abs=" << reference_max_abs << ",max_abs_diff=" << diff
+                  << ",max_relative_diff=" << relative_diff << "\n";
 
         try {
             (void)acc_spmm::run_dtc_placeholder(matrix, rhs, config.warmup, config.repeat);
