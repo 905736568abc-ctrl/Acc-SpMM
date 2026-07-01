@@ -1,4 +1,5 @@
 #include "acc/reorder.hpp"
+#include "acc/pipeline.hpp"
 #include "baseline/cusparse_spmm.hpp"
 #include "benchmark/matrix_loader.hpp"
 #include "dtc/dtc_spmm.hpp"
@@ -62,6 +63,13 @@ int main(int argc, char** argv) {
         const acc_spmm::CsrMatrix reordered_matrix = acc_spmm::apply_reorder(matrix, reorder);
         const acc_spmm::BittcfFormat bittcf_original = acc_spmm::build_bittcf(matrix);
         const acc_spmm::BittcfFormat bittcf_reordered = acc_spmm::build_bittcf(reordered_matrix);
+        const acc_spmm::ReorderDecision reorder_decision =
+            acc_spmm::evaluate_reorder_decision(reorder, bittcf_original, bittcf_reordered);
+        const acc_spmm::CsrMatrix& selected_matrix = reorder_decision.apply_reorder ? reordered_matrix : matrix;
+        const acc_spmm::BittcfFormat& selected_bittcf = reorder_decision.apply_reorder ? bittcf_reordered : bittcf_original;
+        const acc_spmm::DenseMatrix selected_rhs =
+            reorder_decision.apply_reorder ? acc_spmm::apply_rhs_reorder(rhs, reorder) : rhs;
+        const acc_spmm::PipelineConfig pipeline_config = acc_spmm::make_default_pipeline();
 
         std::cout << "[Acc-SpMM-Reproduce]\n";
         std::cout << "matrix=" << config.matrix_path << "\n";
@@ -90,11 +98,16 @@ int main(int argc, char** argv) {
                   << " words_per_block=" << bittcf_reordered.words_per_block
                   << " avg_block_occupancy=" << bittcf_reordered.avg_block_occupancy
                   << " compression_ratio_vs_csr=" << bittcf_reordered.compression_ratio_vs_csr << "\n";
+        std::cout << "reorder_decision apply=" << (reorder_decision.apply_reorder ? 1 : 0)
+                  << " score=" << reorder_decision.score
+                  << " reason=\"" << reorder_decision.reason << "\"\n";
 
         acc_spmm::DenseMatrix reference;
         float diff = -1.0f;
         float reference_max_abs = -1.0f;
         float relative_diff = -1.0f;
+        float pipeline_diff = -1.0f;
+        float pipeline_relative_diff = -1.0f;
         if (config.check) {
             std::cout << "computing_reference=1\n";
             reference = acc_spmm::compute_reference_spmm(matrix, rhs);
@@ -112,9 +125,33 @@ int main(int argc, char** argv) {
             std::cout << "kernel=cusparse max_relative_diff=" << relative_diff << "\n";
         }
 
+        try {
+            acc_spmm::KernelResult pipeline_result = acc_spmm::run_pipeline_placeholder(
+                selected_matrix, selected_rhs, selected_bittcf, config.warmup, config.repeat, pipeline_config);
+            acc_spmm::DenseMatrix pipeline_output = std::move(pipeline_result.output);
+            if (reorder_decision.apply_reorder) {
+                pipeline_output = acc_spmm::restore_output_row_order(pipeline_output, reorder);
+            }
+
+            std::cout << "kernel=pipeline_placeholder average_ms=" << pipeline_result.average_ms
+                      << " gflops=" << pipeline_result.gflops
+                      << " reorder_applied=" << (reorder_decision.apply_reorder ? 1 : 0) << "\n";
+
+            if (config.check) {
+                pipeline_diff = acc_spmm::max_abs_diff(reference, pipeline_output);
+                pipeline_relative_diff = acc_spmm::max_relative_diff(reference, pipeline_output);
+                std::cout << "kernel=pipeline_placeholder max_abs_diff=" << pipeline_diff << "\n";
+                std::cout << "kernel=pipeline_placeholder max_relative_diff=" << pipeline_relative_diff << "\n";
+            }
+        } catch (const std::exception& ex) {
+            std::cout << "kernel=pipeline_placeholder status=skipped reason=\"" << ex.what() << "\"\n";
+        }
+
         std::cout << "csv,matrix=" << config.matrix_path << ",rows=" << matrix.rows << ",cols=" << matrix.cols
                   << ",nnz=" << matrix.nnz() << ",density=" << density << ",n=" << config.dense_cols
                   << ",warmup=" << config.warmup << ",repeat=" << config.repeat << ",kernel=cusparse"
+                  << ",reorder_apply=" << (reorder_decision.apply_reorder ? 1 : 0)
+                  << ",reorder_score=" << reorder_decision.score
                   << ",reorder_before_jaccard=" << reorder.original_metrics.adjacent_tile_jaccard
                   << ",reorder_after_jaccard=" << reorder.reordered_metrics.adjacent_tile_jaccard
                   << ",reorder_before_tile_distance=" << reorder.original_metrics.adjacent_first_tile_distance
@@ -127,7 +164,9 @@ int main(int argc, char** argv) {
                   << ",bittcf_reordered_compression=" << bittcf_reordered.compression_ratio_vs_csr
                   << ",average_ms=" << cusparse.average_ms << ",gflops=" << cusparse.gflops
                   << ",reference_max_abs=" << reference_max_abs << ",max_abs_diff=" << diff
-                  << ",max_relative_diff=" << relative_diff << "\n";
+                  << ",max_relative_diff=" << relative_diff
+                  << ",pipeline_max_abs_diff=" << pipeline_diff
+                  << ",pipeline_max_relative_diff=" << pipeline_relative_diff << "\n";
 
         try {
             (void)acc_spmm::run_dtc_placeholder(matrix, rhs, config.warmup, config.repeat);

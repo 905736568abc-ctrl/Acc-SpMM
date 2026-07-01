@@ -75,6 +75,12 @@ struct ReorderPlan {
     ReorderMetrics reordered_metrics;
 };
 
+struct ReorderDecision {
+    bool apply_reorder = false;
+    double score = 0.0;
+    std::string reason;
+};
+
 struct BittcfFormat {
     int tile_rows = 16;
     int tile_cols = 16;

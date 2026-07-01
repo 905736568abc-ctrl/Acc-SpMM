@@ -564,4 +564,86 @@ CsrMatrix apply_reorder(const CsrMatrix& matrix, const ReorderPlan& plan) {
     return apply_reorder_impl(matrix, plan);
 }
 
+DenseMatrix apply_rhs_reorder(const DenseMatrix& rhs, const ReorderPlan& plan) {
+    if (static_cast<int>(plan.col_permutation.size()) != rhs.rows) {
+        throw std::runtime_error("Column permutation size does not match rhs rows.");
+    }
+
+    DenseMatrix reordered;
+    reordered.rows = rhs.rows;
+    reordered.cols = rhs.cols;
+    reordered.values.assign(rhs.values.size(), 0.0f);
+
+    for (int new_row = 0; new_row < rhs.rows; ++new_row) {
+        const int old_row = plan.col_permutation[static_cast<size_t>(new_row)];
+        for (int col = 0; col < rhs.cols; ++col) {
+            reordered(new_row, col) = rhs(old_row, col);
+        }
+    }
+    return reordered;
+}
+
+DenseMatrix restore_output_row_order(const DenseMatrix& reordered_output, const ReorderPlan& plan) {
+    if (static_cast<int>(plan.row_permutation.size()) != reordered_output.rows) {
+        throw std::runtime_error("Row permutation size does not match output rows.");
+    }
+
+    DenseMatrix restored;
+    restored.rows = reordered_output.rows;
+    restored.cols = reordered_output.cols;
+    restored.values.assign(reordered_output.values.size(), 0.0f);
+
+    for (int new_row = 0; new_row < reordered_output.rows; ++new_row) {
+        const int old_row = plan.row_permutation[static_cast<size_t>(new_row)];
+        for (int col = 0; col < reordered_output.cols; ++col) {
+            restored(old_row, col) = reordered_output(new_row, col);
+        }
+    }
+    return restored;
+}
+
+ReorderDecision evaluate_reorder_decision(const ReorderPlan& plan,
+                                          const BittcfFormat& original_format,
+                                          const BittcfFormat& reordered_format) {
+    ReorderDecision decision;
+
+    auto add_vote = [&](bool positive, double weight, const char* good_reason, const char* bad_reason) {
+        decision.score += positive ? weight : -weight;
+        if (decision.reason.empty()) {
+            decision.reason = positive ? good_reason : bad_reason;
+        }
+    };
+
+    const bool block_improved =
+        reordered_format.tc_block_count > 0 &&
+        reordered_format.tc_block_count <= static_cast<int>(0.98 * static_cast<double>(original_format.tc_block_count));
+    add_vote(block_improved, 3.0, "BitTCF block count decreases.", "BitTCF block count does not decrease enough.");
+
+    const bool occupancy_improved =
+        reordered_format.avg_block_occupancy >= original_format.avg_block_occupancy * 1.02;
+    add_vote(occupancy_improved, 2.5, "BitTCF block occupancy improves.", "BitTCF block occupancy does not improve enough.");
+
+    const bool compression_improved =
+        reordered_format.compression_ratio_vs_csr >= original_format.compression_ratio_vs_csr * 1.02;
+    add_vote(compression_improved, 2.0, "BitTCF compression improves.", "BitTCF compression does not improve enough.");
+
+    const bool locality_improved =
+        plan.reordered_metrics.adjacent_tile_jaccard >= plan.original_metrics.adjacent_tile_jaccard * 1.02;
+    add_vote(locality_improved, 1.0, "Adjacent tile similarity improves.", "Adjacent tile similarity does not improve enough.");
+
+    const bool tiles_reduce =
+        plan.reordered_metrics.avg_unique_col_tiles <= plan.original_metrics.avg_unique_col_tiles * 0.99;
+    add_vote(tiles_reduce, 1.0, "Average unique tile count decreases.", "Average unique tile count does not decrease enough.");
+
+    const bool row_tile_occupancy_improves =
+        plan.reordered_metrics.avg_tile_occupancy >= plan.original_metrics.avg_tile_occupancy * 1.01;
+    add_vote(row_tile_occupancy_improves, 1.0, "Row-level tile occupancy improves.", "Row-level tile occupancy does not improve enough.");
+
+    decision.apply_reorder = block_improved && occupancy_improved && compression_improved && decision.score >= 4.0;
+    if (decision.apply_reorder) {
+        decision.reason = "Reorder enabled: BitTCF and locality metrics improve together.";
+    }
+    return decision;
+}
+
 }  // namespace acc_spmm
