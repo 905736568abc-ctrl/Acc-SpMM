@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <vector>
@@ -18,12 +17,24 @@ struct RowFeature {
     std::vector<int> tiles;
 };
 
-struct Community {
-    std::vector<int> rows;
-    std::vector<int> union_tiles;
-    int first_tile = -1;
-    int total_nnz = 0;
-    int max_span = 0;
+struct GraphData {
+    int vertex_count = 0;
+    int edge_count = 0;
+    std::vector<std::vector<int>> neighbors;
+    std::vector<int> degrees;
+};
+
+struct TreeNode {
+    int left = -1;
+    int right = -1;
+    int leaf_vertex = -1;
+};
+
+struct DsuState {
+    std::vector<int> parent;
+    std::vector<int> size;
+    std::vector<int> community_degree_sum;
+    std::vector<int> tree_root;
 };
 
 RowFeature analyze_row(const CsrMatrix& matrix, int row, int tile_cols) {
@@ -81,13 +92,13 @@ double tile_jaccard(const std::vector<int>& lhs, const std::vector<int>& rhs) {
     return union_count > 0 ? static_cast<double>(intersection) / static_cast<double>(union_count) : 0.0;
 }
 
-int tile_intersection_count(const std::vector<int>& lhs, const std::vector<int>& rhs) {
+int common_neighbor_count(const std::vector<int>& lhs, const std::vector<int>& rhs) {
     size_t i = 0;
     size_t j = 0;
-    int intersection = 0;
+    int common = 0;
     while (i < lhs.size() && j < rhs.size()) {
         if (lhs[i] == rhs[j]) {
-            ++intersection;
+            ++common;
             ++i;
             ++j;
         } else if (lhs[i] < rhs[j]) {
@@ -96,45 +107,7 @@ int tile_intersection_count(const std::vector<int>& lhs, const std::vector<int>&
             ++j;
         }
     }
-    return intersection;
-}
-
-std::vector<int> union_sorted_tiles(const std::vector<int>& lhs, const std::vector<int>& rhs) {
-    std::vector<int> result;
-    result.reserve(lhs.size() + rhs.size());
-    size_t i = 0;
-    size_t j = 0;
-    while (i < lhs.size() && j < rhs.size()) {
-        if (lhs[i] == rhs[j]) {
-            result.push_back(lhs[i]);
-            ++i;
-            ++j;
-        } else if (lhs[i] < rhs[j]) {
-            result.push_back(lhs[i++]);
-        } else {
-            result.push_back(rhs[j++]);
-        }
-    }
-    while (i < lhs.size()) {
-        result.push_back(lhs[i++]);
-    }
-    while (j < rhs.size()) {
-        result.push_back(rhs[j++]);
-    }
-    return result;
-}
-
-double modularity_like_gain(const RowFeature& lhs, const RowFeature& rhs, double total_tile_refs) {
-    const int shared = tile_intersection_count(lhs.tiles, rhs.tiles);
-    if (shared == 0) {
-        return -std::numeric_limits<double>::infinity();
-    }
-
-    const double expected = (static_cast<double>(lhs.tiles.size()) * static_cast<double>(rhs.tiles.size())) /
-                            std::max(1.0, total_tile_refs);
-    const double locality_bonus = 1.0 /
-                                  (1.0 + std::fabs(static_cast<double>(lhs.first_tile - rhs.first_tile)));
-    return static_cast<double>(shared) - expected + 0.05 * locality_bonus;
+    return common;
 }
 
 ReorderMetrics compute_metrics_from_features(const std::vector<RowFeature>& features, int tile_cols) {
@@ -164,7 +137,8 @@ ReorderMetrics compute_metrics_from_features(const std::vector<RowFeature>& feat
 
     for (size_t idx = 1; idx < nonempty_rows.size(); ++idx) {
         jaccard_sum += tile_jaccard(nonempty_rows[idx - 1].tiles, nonempty_rows[idx].tiles);
-        tile_distance_sum += std::fabs(static_cast<double>(nonempty_rows[idx].first_tile - nonempty_rows[idx - 1].first_tile));
+        tile_distance_sum +=
+            std::fabs(static_cast<double>(nonempty_rows[idx].first_tile - nonempty_rows[idx - 1].first_tile));
     }
 
     if (metrics.nonempty_rows > 0) {
@@ -182,216 +156,283 @@ ReorderMetrics compute_metrics_from_features(const std::vector<RowFeature>& feat
     return metrics;
 }
 
-std::vector<RowFeature> build_feature_sequence(const CsrMatrix& matrix, const std::vector<int>& order, int tile_cols) {
+std::vector<RowFeature> build_feature_sequence(const CsrMatrix& matrix, int tile_cols) {
     std::vector<RowFeature> features;
-    features.reserve(order.size());
-    for (int row : order) {
+    features.reserve(static_cast<size_t>(matrix.rows));
+    for (int row = 0; row < matrix.rows; ++row) {
         features.push_back(analyze_row(matrix, row, tile_cols));
     }
     return features;
 }
 
-std::vector<int> build_degree_order(const std::vector<RowFeature>& features) {
-    std::vector<int> order(features.size());
+GraphData build_graph_from_matrix(const CsrMatrix& matrix) {
+    GraphData graph;
+    graph.vertex_count = std::max(matrix.rows, matrix.cols);
+    graph.neighbors.assign(static_cast<size_t>(graph.vertex_count), {});
+
+    for (int row = 0; row < matrix.rows; ++row) {
+        const int begin = matrix.row_offsets[static_cast<size_t>(row)];
+        const int end = matrix.row_offsets[static_cast<size_t>(row) + 1];
+        for (int idx = begin; idx < end; ++idx) {
+            const int col = matrix.col_indices[static_cast<size_t>(idx)];
+            if (row == col) {
+                graph.neighbors[static_cast<size_t>(row)].push_back(col);
+            } else {
+                graph.neighbors[static_cast<size_t>(row)].push_back(col);
+                graph.neighbors[static_cast<size_t>(col)].push_back(row);
+            }
+        }
+    }
+
+    graph.degrees.assign(static_cast<size_t>(graph.vertex_count), 0);
+    int total_adjacency = 0;
+    int self_loops = 0;
+    for (int vertex = 0; vertex < graph.vertex_count; ++vertex) {
+        auto& nbrs = graph.neighbors[static_cast<size_t>(vertex)];
+        std::sort(nbrs.begin(), nbrs.end());
+        nbrs.erase(std::unique(nbrs.begin(), nbrs.end()), nbrs.end());
+        graph.degrees[static_cast<size_t>(vertex)] = static_cast<int>(nbrs.size());
+        total_adjacency += static_cast<int>(nbrs.size());
+        if (std::binary_search(nbrs.begin(), nbrs.end(), vertex)) {
+            self_loops += 1;
+        }
+    }
+
+    graph.edge_count = (total_adjacency - self_loops) / 2 + self_loops;
+    return graph;
+}
+
+DsuState make_dsu(const GraphData& graph, std::vector<TreeNode>* tree_nodes) {
+    DsuState dsu;
+    const size_t n = static_cast<size_t>(graph.vertex_count);
+    dsu.parent.resize(n);
+    dsu.size.assign(n, 1);
+    dsu.community_degree_sum = graph.degrees;
+    dsu.tree_root.resize(n);
+    std::iota(dsu.parent.begin(), dsu.parent.end(), 0);
+    tree_nodes->reserve(n * 2);
+    for (int vertex = 0; vertex < graph.vertex_count; ++vertex) {
+        tree_nodes->push_back(TreeNode{.left = -1, .right = -1, .leaf_vertex = vertex});
+        dsu.tree_root[static_cast<size_t>(vertex)] = vertex;
+    }
+    return dsu;
+}
+
+int dsu_find(DsuState* dsu, int node) {
+    int root = node;
+    while (dsu->parent[static_cast<size_t>(root)] != root) {
+        root = dsu->parent[static_cast<size_t>(root)];
+    }
+    while (dsu->parent[static_cast<size_t>(node)] != node) {
+        const int parent = dsu->parent[static_cast<size_t>(node)];
+        dsu->parent[static_cast<size_t>(node)] = root;
+        node = parent;
+    }
+    return root;
+}
+
+int dsu_union(DsuState* dsu, int lhs, int rhs, std::vector<TreeNode>* tree_nodes) {
+    int lhs_root = dsu_find(dsu, lhs);
+    int rhs_root = dsu_find(dsu, rhs);
+    if (lhs_root == rhs_root) {
+        return lhs_root;
+    }
+
+    if (dsu->size[static_cast<size_t>(lhs_root)] < dsu->size[static_cast<size_t>(rhs_root)]) {
+        std::swap(lhs_root, rhs_root);
+    }
+
+    const int new_tree_root = static_cast<int>(tree_nodes->size());
+    tree_nodes->push_back(TreeNode{
+        .left = dsu->tree_root[static_cast<size_t>(lhs_root)],
+        .right = dsu->tree_root[static_cast<size_t>(rhs_root)],
+        .leaf_vertex = -1,
+    });
+
+    dsu->parent[static_cast<size_t>(rhs_root)] = lhs_root;
+    dsu->size[static_cast<size_t>(lhs_root)] += dsu->size[static_cast<size_t>(rhs_root)];
+    dsu->community_degree_sum[static_cast<size_t>(lhs_root)] +=
+        dsu->community_degree_sum[static_cast<size_t>(rhs_root)];
+    dsu->tree_root[static_cast<size_t>(lhs_root)] = new_tree_root;
+    return lhs_root;
+}
+
+std::vector<int> build_degree_order(const GraphData& graph) {
+    std::vector<int> order(static_cast<size_t>(graph.vertex_count));
     std::iota(order.begin(), order.end(), 0);
-    std::stable_sort(order.begin(), order.end(), [&](int lhs_row, int rhs_row) {
-        const RowFeature& lhs = features[static_cast<size_t>(lhs_row)];
-        const RowFeature& rhs = features[static_cast<size_t>(rhs_row)];
-        const bool lhs_empty = lhs.nnz == 0;
-        const bool rhs_empty = rhs.nnz == 0;
-        if (lhs_empty != rhs_empty) {
-            return !lhs_empty;
+    std::stable_sort(order.begin(), order.end(), [&](int lhs, int rhs) {
+        if (graph.degrees[static_cast<size_t>(lhs)] != graph.degrees[static_cast<size_t>(rhs)]) {
+            return graph.degrees[static_cast<size_t>(lhs)] < graph.degrees[static_cast<size_t>(rhs)];
         }
-        if (lhs.tiles.size() != rhs.tiles.size()) {
-            return lhs.tiles.size() < rhs.tiles.size();
-        }
-        if (lhs.nnz != rhs.nnz) {
-            return lhs.nnz < rhs.nnz;
-        }
-        if (lhs.first_tile != rhs.first_tile) {
-            return lhs.first_tile < rhs.first_tile;
-        }
-        return lhs.row < rhs.row;
+        return lhs < rhs;
     });
     return order;
 }
 
-std::vector<std::vector<int>> build_tile_to_rows(const std::vector<RowFeature>& features,
-                                                 const std::vector<int>& degree_order,
-                                                 int tile_cols,
-                                                 int matrix_cols) {
-    const int tile_count = std::max(1, (matrix_cols + tile_cols - 1) / tile_cols);
-    std::vector<std::vector<int>> tile_to_rows(static_cast<size_t>(tile_count));
-    for (int row : degree_order) {
-        for (int tile : features[static_cast<size_t>(row)].tiles) {
-            tile_to_rows[static_cast<size_t>(tile)].push_back(row);
+std::vector<int> build_tree_roots(const GraphData& graph, DsuState* dsu) {
+    std::vector<int> roots;
+    roots.reserve(static_cast<size_t>(graph.vertex_count));
+    std::vector<char> seen(static_cast<size_t>(graph.vertex_count), 0);
+    for (int vertex = 0; vertex < graph.vertex_count; ++vertex) {
+        const int root = dsu_find(dsu, vertex);
+        if (!seen[static_cast<size_t>(root)]) {
+            seen[static_cast<size_t>(root)] = 1;
+            roots.push_back(dsu->tree_root[static_cast<size_t>(root)]);
         }
     }
-    return tile_to_rows;
+    return roots;
 }
 
-Community make_singleton_community(const RowFeature& feature) {
-    Community community;
-    community.rows.push_back(feature.row);
-    community.union_tiles = feature.tiles;
-    community.first_tile = feature.first_tile;
-    community.total_nnz = feature.nnz;
-    community.max_span = feature.span;
-    return community;
+void collect_leaves_dfs(const std::vector<TreeNode>& tree_nodes, int node, std::vector<int>* leaves) {
+    if (node < 0) {
+        return;
+    }
+    const TreeNode& tree_node = tree_nodes[static_cast<size_t>(node)];
+    if (tree_node.leaf_vertex >= 0) {
+        leaves->push_back(tree_node.leaf_vertex);
+        return;
+    }
+    collect_leaves_dfs(tree_nodes, tree_node.left, leaves);
+    collect_leaves_dfs(tree_nodes, tree_node.right, leaves);
 }
 
-Community make_pair_community(const RowFeature& lhs, const RowFeature& rhs) {
-    Community community;
-    community.rows = {lhs.row, rhs.row};
-    std::stable_sort(community.rows.begin(), community.rows.end(), [&](int lhs_row, int rhs_row) {
-        const RowFeature& l = lhs_row == lhs.row ? lhs : rhs;
-        const RowFeature& r = rhs_row == lhs.row ? lhs : rhs;
-        if (l.tiles != r.tiles) {
-            return l.tiles < r.tiles;
-        }
-        if (l.span != r.span) {
-            return l.span < r.span;
-        }
-        if (l.nnz != r.nnz) {
-            return l.nnz > r.nnz;
-        }
-        return l.row < r.row;
-    });
-    community.union_tiles = union_sorted_tiles(lhs.tiles, rhs.tiles);
-    community.first_tile = community.union_tiles.empty() ? -1 : community.union_tiles.front();
-    community.total_nnz = lhs.nnz + rhs.nnz;
-    community.max_span = std::max(lhs.span, rhs.span);
-    return community;
-}
+std::vector<int> order_subtree_vertices(const GraphData& graph,
+                                        const std::vector<int>& dfs_leaves,
+                                        const std::vector<int>& component_of_vertex) {
+    if (dfs_leaves.empty()) {
+        return {};
+    }
 
-std::vector<Community> build_modularity_like_communities(const std::vector<RowFeature>& features,
-                                                         int tile_cols,
-                                                         int matrix_cols) {
-    constexpr int kMaxCandidatesPerTile = 32;
+    std::vector<char> in_subtree(static_cast<size_t>(graph.vertex_count), 0);
+    for (int vertex : dfs_leaves) {
+        in_subtree[static_cast<size_t>(vertex)] = 1;
+    }
 
-    const std::vector<int> degree_order = build_degree_order(features);
-    const std::vector<std::vector<int>> tile_to_rows = build_tile_to_rows(features, degree_order, tile_cols, matrix_cols);
-    const double total_tile_refs =
-        std::max(1.0, std::accumulate(features.begin(),
-                                      features.end(),
-                                      0.0,
-                                      [](double acc, const RowFeature& feature) {
-                                          return acc + static_cast<double>(feature.tiles.size());
-                                      }));
+    std::vector<char> visited(static_cast<size_t>(graph.vertex_count), 0);
+    std::vector<int> ordered;
+    ordered.reserve(dfs_leaves.size());
 
-    std::vector<char> assigned(features.size(), 0);
-    std::vector<int> visit_stamp(features.size(), -1);
-    int current_stamp = 0;
-    std::vector<Community> communities;
-    communities.reserve(features.size());
+    int current = dfs_leaves.front();
+    visited[static_cast<size_t>(current)] = 1;
+    ordered.push_back(current);
 
-    for (int row : degree_order) {
-        if (assigned[static_cast<size_t>(row)]) {
-            continue;
+    while (ordered.size() < dfs_leaves.size()) {
+        int best_next = -1;
+        int best_common = -1;
+        for (int candidate : graph.neighbors[static_cast<size_t>(current)]) {
+            if (!in_subtree[static_cast<size_t>(candidate)] || visited[static_cast<size_t>(candidate)]) {
+                continue;
+            }
+            if (component_of_vertex[static_cast<size_t>(candidate)] != component_of_vertex[static_cast<size_t>(current)]) {
+                continue;
+            }
+            const int common = common_neighbor_count(graph.neighbors[static_cast<size_t>(current)],
+                                                     graph.neighbors[static_cast<size_t>(candidate)]);
+            if (common > best_common ||
+                (common == best_common &&
+                 graph.degrees[static_cast<size_t>(candidate)] < graph.degrees[static_cast<size_t>(best_next >= 0 ? best_next : candidate)]) ||
+                (common == best_common &&
+                 graph.degrees[static_cast<size_t>(candidate)] ==
+                     graph.degrees[static_cast<size_t>(best_next >= 0 ? best_next : candidate)] &&
+                 candidate < (best_next >= 0 ? best_next : candidate))) {
+                best_common = common;
+                best_next = candidate;
+            }
         }
 
-        const RowFeature& source = features[static_cast<size_t>(row)];
-        assigned[static_cast<size_t>(row)] = 1;
-        if (source.nnz == 0 || source.tiles.empty()) {
-            communities.push_back(make_singleton_community(source));
-            continue;
-        }
-
-        int best_row = -1;
-        int best_overlap = -1;
-        double best_gain = 0.0;
-        ++current_stamp;
-
-        for (int tile : source.tiles) {
-            int examined = 0;
-            for (int candidate : tile_to_rows[static_cast<size_t>(tile)]) {
-                if (examined >= kMaxCandidatesPerTile) {
+        if (best_next < 0) {
+            for (int vertex : dfs_leaves) {
+                if (!visited[static_cast<size_t>(vertex)]) {
+                    best_next = vertex;
                     break;
-                }
-                if (candidate == row || assigned[static_cast<size_t>(candidate)]) {
-                    continue;
-                }
-                if (visit_stamp[static_cast<size_t>(candidate)] == current_stamp) {
-                    continue;
-                }
-                visit_stamp[static_cast<size_t>(candidate)] = current_stamp;
-                examined += 1;
-
-                const RowFeature& neighbor = features[static_cast<size_t>(candidate)];
-                const int overlap = tile_intersection_count(source.tiles, neighbor.tiles);
-                const double gain = modularity_like_gain(source, neighbor, total_tile_refs);
-                if (gain > best_gain ||
-                    (std::fabs(gain - best_gain) < 1.0e-12 && overlap > best_overlap) ||
-                    (std::fabs(gain - best_gain) < 1.0e-12 && overlap == best_overlap &&
-                     neighbor.tiles.size() < features[static_cast<size_t>(best_row >= 0 ? best_row : candidate)].tiles.size()) ||
-                    (std::fabs(gain - best_gain) < 1.0e-12 && overlap == best_overlap &&
-                     neighbor.tiles.size() == features[static_cast<size_t>(best_row >= 0 ? best_row : candidate)].tiles.size() &&
-                     candidate < (best_row >= 0 ? best_row : candidate))) {
-                    best_gain = gain;
-                    best_overlap = overlap;
-                    best_row = candidate;
                 }
             }
         }
 
-        if (best_row >= 0 && best_gain > 0.0) {
-            assigned[static_cast<size_t>(best_row)] = 1;
-            communities.push_back(make_pair_community(source, features[static_cast<size_t>(best_row)]));
-        } else {
-            communities.push_back(make_singleton_community(source));
-        }
+        visited[static_cast<size_t>(best_next)] = 1;
+        ordered.push_back(best_next);
+        current = best_next;
     }
 
-    return communities;
+    return ordered;
 }
 
-std::vector<int> flatten_communities(std::vector<Community> communities) {
-    std::stable_sort(communities.begin(), communities.end(), [](const Community& lhs, const Community& rhs) {
-        if (lhs.union_tiles.size() != rhs.union_tiles.size()) {
-            return lhs.union_tiles.size() < rhs.union_tiles.size();
+std::vector<int> build_vertex_order(const GraphData& graph,
+                                    const std::vector<TreeNode>& tree_nodes,
+                                    DsuState* dsu) {
+    const std::vector<int> roots = build_tree_roots(graph, dsu);
+    std::vector<int> component_of_vertex(static_cast<size_t>(graph.vertex_count), -1);
+    for (int vertex = 0; vertex < graph.vertex_count; ++vertex) {
+        component_of_vertex[static_cast<size_t>(vertex)] = dsu_find(dsu, vertex);
+    }
+
+    struct RootLeaves {
+        int root = -1;
+        std::vector<int> leaves;
+    };
+
+    std::vector<RootLeaves> root_leaves;
+    root_leaves.reserve(roots.size());
+    for (int root : roots) {
+        RootLeaves item;
+        item.root = root;
+        collect_leaves_dfs(tree_nodes, root, &item.leaves);
+        root_leaves.push_back(std::move(item));
+    }
+
+    std::stable_sort(root_leaves.begin(), root_leaves.end(), [&](const RootLeaves& lhs, const RootLeaves& rhs) {
+        const int lhs_first = lhs.leaves.empty() ? graph.vertex_count : lhs.leaves.front();
+        const int rhs_first = rhs.leaves.empty() ? graph.vertex_count : rhs.leaves.front();
+        if (lhs.leaves.empty() != rhs.leaves.empty()) {
+            return !lhs.leaves.empty();
         }
-        if (lhs.union_tiles != rhs.union_tiles) {
-            return lhs.union_tiles < rhs.union_tiles;
+        if (!lhs.leaves.empty() && !rhs.leaves.empty()) {
+            const int lhs_degree = graph.degrees[static_cast<size_t>(lhs_first)];
+            const int rhs_degree = graph.degrees[static_cast<size_t>(rhs_first)];
+            if (lhs_degree != rhs_degree) {
+                return lhs_degree < rhs_degree;
+            }
         }
-        if (lhs.max_span != rhs.max_span) {
-            return lhs.max_span < rhs.max_span;
-        }
-        if (lhs.total_nnz != rhs.total_nnz) {
-            return lhs.total_nnz > rhs.total_nnz;
-        }
-        return lhs.rows < rhs.rows;
+        return lhs_first < rhs_first;
     });
 
     std::vector<int> order;
-    for (const Community& community : communities) {
-        order.insert(order.end(), community.rows.begin(), community.rows.end());
+    order.reserve(static_cast<size_t>(graph.vertex_count));
+    for (const RootLeaves& item : root_leaves) {
+        const std::vector<int> ordered = order_subtree_vertices(graph, item.leaves, component_of_vertex);
+        order.insert(order.end(), ordered.begin(), ordered.end());
     }
     return order;
 }
 
-}  // namespace
+void build_row_and_col_permutations(const CsrMatrix& matrix, ReorderPlan* plan) {
+    plan->row_permutation.clear();
+    plan->col_permutation.clear();
+    plan->row_permutation.reserve(static_cast<size_t>(matrix.rows));
+    plan->col_permutation.reserve(static_cast<size_t>(matrix.cols));
+    plan->row_old_to_new.assign(static_cast<size_t>(matrix.rows), -1);
+    plan->col_old_to_new.assign(static_cast<size_t>(matrix.cols), -1);
 
-ReorderPlan build_affinity_reorder(const CsrMatrix& matrix, int tile_cols) {
-    ReorderPlan plan;
-    if (tile_cols <= 0) {
-        throw std::runtime_error("tile_cols must be positive.");
+    for (int old_vertex : plan->vertex_order) {
+        if (old_vertex < matrix.rows) {
+            const int new_row = static_cast<int>(plan->row_permutation.size());
+            plan->row_permutation.push_back(old_vertex);
+            plan->row_old_to_new[static_cast<size_t>(old_vertex)] = new_row;
+        }
+        if (old_vertex < matrix.cols) {
+            const int new_col = static_cast<int>(plan->col_permutation.size());
+            plan->col_permutation.push_back(old_vertex);
+            plan->col_old_to_new[static_cast<size_t>(old_vertex)] = new_col;
+        }
     }
-
-    plan.permutation.resize(matrix.rows);
-    std::iota(plan.permutation.begin(), plan.permutation.end(), 0);
-
-    const std::vector<RowFeature> original_features = build_feature_sequence(matrix, plan.permutation, tile_cols);
-    plan.original_metrics = compute_metrics_from_features(original_features, tile_cols);
-    plan.permutation = flatten_communities(build_modularity_like_communities(original_features, tile_cols, matrix.cols));
-
-    const std::vector<RowFeature> reordered_features = build_feature_sequence(matrix, plan.permutation, tile_cols);
-    plan.reordered_metrics = compute_metrics_from_features(reordered_features, tile_cols);
-    return plan;
 }
 
-CsrMatrix apply_reorder(const CsrMatrix& matrix, const ReorderPlan& plan) {
-    if (static_cast<int>(plan.permutation.size()) != matrix.rows) {
-        throw std::runtime_error("Reorder permutation size does not match matrix rows.");
+CsrMatrix apply_reorder_impl(const CsrMatrix& matrix, const ReorderPlan& plan) {
+    if (static_cast<int>(plan.row_permutation.size()) != matrix.rows) {
+        throw std::runtime_error("Row permutation size does not match matrix rows.");
+    }
+    if (static_cast<int>(plan.col_permutation.size()) != matrix.cols) {
+        throw std::runtime_error("Column permutation size does not match matrix cols.");
     }
 
     CsrMatrix reordered;
@@ -402,18 +443,125 @@ CsrMatrix apply_reorder(const CsrMatrix& matrix, const ReorderPlan& plan) {
     reordered.values.reserve(matrix.values.size());
 
     for (int new_row = 0; new_row < matrix.rows; ++new_row) {
-        const int old_row = plan.permutation[static_cast<size_t>(new_row)];
+        const int old_row = plan.row_permutation[static_cast<size_t>(new_row)];
         const int begin = matrix.row_offsets[static_cast<size_t>(old_row)];
         const int end = matrix.row_offsets[static_cast<size_t>(old_row) + 1];
-        reordered.row_offsets[static_cast<size_t>(new_row) + 1] =
-            reordered.row_offsets[static_cast<size_t>(new_row)] + (end - begin);
+
+        std::vector<std::pair<int, float>> remapped_entries;
+        remapped_entries.reserve(static_cast<size_t>(end - begin));
         for (int idx = begin; idx < end; ++idx) {
-            reordered.col_indices.push_back(matrix.col_indices[static_cast<size_t>(idx)]);
-            reordered.values.push_back(matrix.values[static_cast<size_t>(idx)]);
+            const int old_col = matrix.col_indices[static_cast<size_t>(idx)];
+            const int new_col = plan.col_old_to_new[static_cast<size_t>(old_col)];
+            remapped_entries.emplace_back(new_col, matrix.values[static_cast<size_t>(idx)]);
+        }
+
+        std::sort(remapped_entries.begin(), remapped_entries.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.first < rhs.first;
+        });
+
+        reordered.row_offsets[static_cast<size_t>(new_row) + 1] =
+            reordered.row_offsets[static_cast<size_t>(new_row)] + static_cast<int>(remapped_entries.size());
+        for (const auto& entry : remapped_entries) {
+            reordered.col_indices.push_back(entry.first);
+            reordered.values.push_back(entry.second);
         }
     }
 
     return reordered;
+}
+
+double modularity_gain_score(int shared_edges, int degree_v, int community_degree_sum, int edge_count) {
+    if (shared_edges <= 0 || edge_count <= 0) {
+        return -1.0;
+    }
+    const double two_m = 2.0 * static_cast<double>(edge_count);
+    const double actual = static_cast<double>(shared_edges) / two_m;
+    const double expected = (static_cast<double>(degree_v) * static_cast<double>(community_degree_sum)) / (two_m * two_m);
+    return actual - expected;
+}
+
+}  // namespace
+
+ReorderPlan build_affinity_reorder(const CsrMatrix& matrix, int tile_cols) {
+    if (tile_cols <= 0) {
+        throw std::runtime_error("tile_cols must be positive.");
+    }
+
+    ReorderPlan plan;
+    const std::vector<RowFeature> original_features = build_feature_sequence(matrix, tile_cols);
+    plan.original_metrics = compute_metrics_from_features(original_features, tile_cols);
+
+    const GraphData graph = build_graph_from_matrix(matrix);
+    std::vector<TreeNode> tree_nodes;
+    DsuState dsu = make_dsu(graph, &tree_nodes);
+    const std::vector<int> degree_order = build_degree_order(graph);
+
+    std::vector<int> touched_roots;
+    touched_roots.reserve(32);
+    for (int vertex : degree_order) {
+        const int vertex_root = dsu_find(&dsu, vertex);
+        touched_roots.clear();
+        std::vector<int> shared_edges;
+        std::vector<int> candidate_roots;
+        std::vector<int> seen_root_index(static_cast<size_t>(graph.vertex_count), -1);
+
+        for (int neighbor : graph.neighbors[static_cast<size_t>(vertex)]) {
+            const int neighbor_root = dsu_find(&dsu, neighbor);
+            if (neighbor_root == vertex_root) {
+                continue;
+            }
+            int index = seen_root_index[static_cast<size_t>(neighbor_root)];
+            if (index < 0) {
+                index = static_cast<int>(candidate_roots.size());
+                seen_root_index[static_cast<size_t>(neighbor_root)] = index;
+                candidate_roots.push_back(neighbor_root);
+                shared_edges.push_back(0);
+                touched_roots.push_back(neighbor_root);
+            }
+            shared_edges[static_cast<size_t>(index)] += 1;
+        }
+
+        double best_gain = 0.0;
+        int best_root = -1;
+        for (size_t idx = 0; idx < candidate_roots.size(); ++idx) {
+            const int candidate_root = candidate_roots[idx];
+            const double gain = modularity_gain_score(shared_edges[idx],
+                                                      graph.degrees[static_cast<size_t>(vertex)],
+                                                      dsu.community_degree_sum[static_cast<size_t>(candidate_root)],
+                                                      graph.edge_count);
+            if (gain > best_gain ||
+                (std::fabs(gain - best_gain) < 1.0e-12 &&
+                 dsu.community_degree_sum[static_cast<size_t>(candidate_root)] <
+                     dsu.community_degree_sum[static_cast<size_t>(best_root >= 0 ? best_root : candidate_root)]) ||
+                (std::fabs(gain - best_gain) < 1.0e-12 &&
+                 dsu.community_degree_sum[static_cast<size_t>(candidate_root)] ==
+                     dsu.community_degree_sum[static_cast<size_t>(best_root >= 0 ? best_root : candidate_root)] &&
+                 candidate_root < (best_root >= 0 ? best_root : candidate_root))) {
+                best_gain = gain;
+                best_root = candidate_root;
+            }
+        }
+
+        for (int touched_root : touched_roots) {
+            seen_root_index[static_cast<size_t>(touched_root)] = -1;
+        }
+
+        if (best_root >= 0 && best_gain > 0.0) {
+            (void)dsu_union(&dsu, vertex_root, best_root, &tree_nodes);
+        }
+    }
+
+    plan.vertex_order = build_vertex_order(graph, tree_nodes, &dsu);
+    build_row_and_col_permutations(matrix, &plan);
+
+    const CsrMatrix reordered_matrix = apply_reorder_impl(matrix, plan);
+    const std::vector<RowFeature> reordered_features = build_feature_sequence(reordered_matrix, tile_cols);
+    plan.reordered_metrics = compute_metrics_from_features(reordered_features, tile_cols);
+    return plan;
+}
+
+CsrMatrix apply_reorder(const CsrMatrix& matrix, const ReorderPlan& plan) {
+    return apply_reorder_impl(matrix, plan);
 }
 
 }  // namespace acc_spmm

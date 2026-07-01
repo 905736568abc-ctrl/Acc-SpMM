@@ -66,7 +66,11 @@ struct ReorderMetrics {
 };
 
 struct ReorderPlan {
-    std::vector<int> permutation;
+    std::vector<int> vertex_order;
+    std::vector<int> row_permutation;
+    std::vector<int> col_permutation;
+    std::vector<int> row_old_to_new;
+    std::vector<int> col_old_to_new;
     ReorderMetrics original_metrics;
     ReorderMetrics reordered_metrics;
 };

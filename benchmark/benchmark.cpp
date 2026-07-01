@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
         std::cout << std::fixed << std::setprecision(8);
         std::cout << "density=" << density << "\n";
         std::cout << "spmm_flop_count=" << flop_count << "\n";
-        std::cout << "reorder_plan_size=" << reorder.permutation.size() << "\n";
+        std::cout << "reorder_plan_size=" << reorder.row_permutation.size() << "\n";
         std::cout << "reorder_before adjacent_tile_jaccard=" << reorder.original_metrics.adjacent_tile_jaccard
                   << " adjacent_first_tile_distance=" << reorder.original_metrics.adjacent_first_tile_distance
                   << " avg_unique_col_tiles=" << reorder.original_metrics.avg_unique_col_tiles
